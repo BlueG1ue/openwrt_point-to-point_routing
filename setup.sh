@@ -1,8 +1,24 @@
 #!/bin/sh
 # =================================================================
 # Точечный обход блокировок для OpenWrt (WireGuard / AmneziaWG)
-# Умная установка с защитой от обрывов сети
+# Версия: Бронебойная (с защитой от теневых блокировок фаервола)
 # =================================================================
+
+# Функция ожидания: скрипт замирает, если фаервол OpenWrt временно блокирует сеть
+wait_for_fw() {
+    echo -n "Ожидание готовности сети и фаервола"
+    # Ждем, пока пойдут пинги (проверка базовой связи)
+    while ! ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1; do
+        echo -n "."
+        sleep 2
+    done
+    # Ждем, пока фаервол не разрешит HTTPS-трафик (wget)
+    while ! wget -q --spider --no-check-certificate https://downloads.openwrt.org >/dev/null 2>&1; do
+        echo -n "."
+        sleep 2
+    done
+    echo " OK!"
+}
 
 echo "=== Выбор протокола ==="
 echo "1) Стандартный WireGuard (Пакеты из оф. репозитория)"
@@ -10,44 +26,29 @@ echo "2) AmneziaWG (Установка пакетов через скрипт Sl
 read -p "Введите цифру (1 или 2): " vpn_choice
 
 echo -e "\n=== Подготовка DNS и репозиториев ==="
-# Временно фиксируем DNS, чтобы wget и opkg не отвалились в процессе
-echo "nameserver 8.8.8.8" > /tmp/resolv.conf.d/resolv.conf.auto
-ln -sf /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
+# Жестко отвязываем resolv.conf от системы на время работы скрипта
+rm -f /etc/resolv.conf
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
+wait_for_fw
 opkg update
 
-# Тихо удаляем dnsmasq (если он есть) и ждем восстановления сети
-if opkg list-installed | grep -q "^dnsmasq "; then
-    echo "Удаляем базовый dnsmasq. Возможен кратковременный обрыв сети..."
+# Тихо удаляем базовый dnsmasq
+if opkg list-installed | grep -q "^dnsmasq$"; then
+    echo "Удаляем базовый dnsmasq..."
     opkg remove dnsmasq
-    echo "Ждем 7 секунд для перезапуска фаервола..."
-    sleep 7
+    sleep 3
 fi
 
-# Устанавливаем dnsmasq-full с защитой от обрыва связи
 echo "Устанавливаем dnsmasq-full..."
-for i in 1 2 3; do
-    if opkg install dnsmasq-full; then
-        echo "✅ dnsmasq-full успешно установлен!"
-        break
-    else
-        echo "⚠️ Ошибка скачивания. Ждем 5 секунд и пробуем снова (Попытка $i из 3)..."
-        sleep 5
-    fi
-done
+wait_for_fw
+opkg install dnsmasq-full
 
 # Установка VPN пакетов
 if [ "$vpn_choice" = "1" ]; then
     echo -e "\n=== Установка пакетов WireGuard ==="
-    for i in 1 2 3; do
-        if opkg install wireguard-tools luci-app-wireguard; then
-            echo "✅ Пакеты WireGuard установлены!"
-            break
-        else
-            echo "⚠️ Ошибка скачивания пакетов WG. Пробуем снова (Попытка $i из 3)..."
-            sleep 5
-        fi
-    done
+    wait_for_fw
+    opkg install wireguard-tools luci-app-wireguard
     VPN_PROTO="wireguard"
     VPN_IFACE="WG_VPN"
 elif [ "$vpn_choice" = "2" ]; then
@@ -56,11 +57,15 @@ elif [ "$vpn_choice" = "2" ]; then
     echo "-> На вопрос об установке пакетов ответьте: Y"
     echo "-> На вопрос о создании интерфейса ответьте: n (МЫ СОЗДАДИМ ЕГО САМИ)"
     sleep 3
+    wait_for_fw
     sh <(wget --no-check-certificate -qO - https://raw.githubusercontent.com/Slava-Shchipunov/awg-openwrt/refs/heads/master/amneziawg-install.sh)
     VPN_PROTO="amneziawg"
     VPN_IFACE="AWG_VPN"
 else
     echo "❌ Ошибка выбора. Скрипт остановлен."
+    # Возвращаем DNS как было перед выходом
+    rm -f /etc/resolv.conf
+    ln -s /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
     exit 1
 fi
 
@@ -194,6 +199,10 @@ EOF
 chmod +x /etc/hotplug.d/iface/99-vpn-routing
 
 echo "=== Завершение ==="
+# Возвращаем стандартный резолвер OpenWrt на место
+rm -f /etc/resolv.conf
+ln -s /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
+
 /etc/init.d/dnsmasq restart
 /etc/init.d/vpn-routing start
 
