@@ -1,6 +1,7 @@
 #!/bin/sh
 # =================================================================
 # Точечный обход блокировок для OpenWrt (WireGuard / AmneziaWG)
+# Умная установка с защитой от обрывов сети
 # =================================================================
 
 echo "=== Выбор протокола ==="
@@ -14,12 +15,39 @@ echo "nameserver 8.8.8.8" > /tmp/resolv.conf.d/resolv.conf.auto
 ln -sf /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
 
 opkg update
-opkg remove dnsmasq
-opkg install dnsmasq-full
 
+# Тихо удаляем dnsmasq (если он есть) и ждем восстановления сети
+if opkg list-installed | grep -q "^dnsmasq "; then
+    echo "Удаляем базовый dnsmasq. Возможен кратковременный обрыв сети..."
+    opkg remove dnsmasq
+    echo "Ждем 7 секунд для перезапуска фаервола..."
+    sleep 7
+fi
+
+# Устанавливаем dnsmasq-full с защитой от обрыва связи
+echo "Устанавливаем dnsmasq-full..."
+for i in 1 2 3; do
+    if opkg install dnsmasq-full; then
+        echo "✅ dnsmasq-full успешно установлен!"
+        break
+    else
+        echo "⚠️ Ошибка скачивания. Ждем 5 секунд и пробуем снова (Попытка $i из 3)..."
+        sleep 5
+    fi
+done
+
+# Установка VPN пакетов
 if [ "$vpn_choice" = "1" ]; then
     echo -e "\n=== Установка пакетов WireGuard ==="
-    opkg install wireguard-tools luci-app-wireguard
+    for i in 1 2 3; do
+        if opkg install wireguard-tools luci-app-wireguard; then
+            echo "✅ Пакеты WireGuard установлены!"
+            break
+        else
+            echo "⚠️ Ошибка скачивания пакетов WG. Пробуем снова (Попытка $i из 3)..."
+            sleep 5
+        fi
+    done
     VPN_PROTO="wireguard"
     VPN_IFACE="WG_VPN"
 elif [ "$vpn_choice" = "2" ]; then
@@ -28,7 +56,7 @@ elif [ "$vpn_choice" = "2" ]; then
     echo "-> На вопрос об установке пакетов ответьте: Y"
     echo "-> На вопрос о создании интерфейса ответьте: n (МЫ СОЗДАДИМ ЕГО САМИ)"
     sleep 3
-    sh <(wget -qO - https://raw.githubusercontent.com/Slava-Shchipunov/awg-openwrt/refs/heads/master/amneziawg-install.sh)
+    sh <(wget --no-check-certificate -qO - https://raw.githubusercontent.com/Slava-Shchipunov/awg-openwrt/refs/heads/master/amneziawg-install.sh)
     VPN_PROTO="amneziawg"
     VPN_IFACE="AWG_VPN"
 else
