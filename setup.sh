@@ -1,7 +1,7 @@
 #!/bin/sh
 # =================================================================
 # Точечный обход блокировок для OpenWrt (WireGuard / AmneziaWG)
-# Версия: Неубиваемая 7.0 (Динамический поиск интерфейсов)
+# Версия: Неубиваемая 8.0 (Идеальная совместимость с netifd)
 # =================================================================
 
 wait_for_fw() {
@@ -83,6 +83,7 @@ if [ "$vpn_choice" = "1" ]; then
     VPN_PROTO="wireguard"
     VPN_IFACE="WG_VPN"
     VPN_ZONE="WG"
+    L3_DEV="WG_VPN" # Стандартный WG использует имя интерфейса
 elif [ "$vpn_choice" = "2" ]; then
     echo -e "\n=== Установка пакетов AmneziaWG ==="
     
@@ -115,6 +116,7 @@ elif [ "$vpn_choice" = "2" ]; then
     VPN_PROTO="amneziawg"
     VPN_IFACE="AWG_VPN"
     VPN_ZONE="AWG"
+    L3_DEV="amneziawg-AWG_VPN" # AmneziaWG всегда добавляет этот префикс
 else
     echo "❌ Ошибка выбора."
     rm -f /etc/resolv.conf
@@ -127,8 +129,6 @@ sleep 5
 
 uci set network.$VPN_IFACE=interface
 uci set network.$VPN_IFACE.proto="$VPN_PROTO"
-# Пытаемся принудительно задать чистое имя устройства
-uci set network.$VPN_IFACE.device="$VPN_IFACE"
 uci set network.$VPN_IFACE.listen_port='51820'
 uci add_list network.$VPN_IFACE.addresses='10.8.1.10/32'
 
@@ -178,6 +178,7 @@ nftset=/2ip.ru/4#inet#fw4#vpn_domains
 EOF
 
 echo "=== Установка службы vpn-routing ==="
+# Обрати внимание: переменная L3_DEV вшивается прямо в генерируемый скрипт
 cat << EOF > /etc/init.d/vpn-routing
 #!/bin/sh /etc/rc.common
 
@@ -190,18 +191,9 @@ boot() {
 
 start() {
     IFACE="$VPN_IFACE"
-    
-    # МАГИЯ: Запрашиваем реальное имя физического устройства у ядра OpenWrt (через ubus)
-    L3_DEV=\$(ubus call network.interface.\$IFACE status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
-    
-    # Если ubus ничего не вернул, используем резервное имя
-    [ -z "\$L3_DEV" ] && L3_DEV="\$IFACE"
+    L3_DEV="$L3_DEV"
 
-    if [ ! -d "/sys/class/net/\$L3_DEV" ]; then
-        logger -t vpn-routing "Device \$L3_DEV not found. Is VPN connected?"
-        return 1
-    fi
-
+    # Создаем сеты в nftables
     nft add set inet fw4 vpn_domains '{ type ipv4_addr; }' 2>/dev/null
     nft flush set inet fw4 vpn_domains
 
@@ -217,7 +209,7 @@ start() {
     nft flush chain inet fw4 vpn_mark
     nft add rule inet fw4 vpn_mark ip daddr @vpn_domains meta mark set 0x1
     
-    # Применяем правила к реальному физическому устройству
+    # Привязываем маскарадинг к правильному физическому устройству
     nft add rule inet fw4 srcnat oifname "\$L3_DEV" masquerade 2>/dev/null
     nft add rule inet fw4 mangle_forward oifname "\$L3_DEV" tcp flags syn tcp option maxseg size set rt mtu 2>/dev/null
 
@@ -225,10 +217,11 @@ start() {
         nft insert rule inet fw4 mangle_prerouting jump vpn_mark
     fi
 
+    # Маршрутизация (добавляем маршрут только если устройство уже создано системой)
     ip rule del fwmark 0x1 lookup 100 2>/dev/null
     ip rule add fwmark 0x1 lookup 100
     ip route flush table 100 2>/dev/null
-    ip route add default dev \$L3_DEV table 100
+    ip route add default dev \$L3_DEV table 100 2>/dev/null
 
     echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null
     echo 0 > /proc/sys/net/ipv4/conf/\$L3_DEV/rp_filter 2>/dev/null
