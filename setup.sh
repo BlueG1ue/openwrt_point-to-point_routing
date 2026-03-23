@@ -1,7 +1,7 @@
 #!/bin/sh
 # =================================================================
 # Точечный обход блокировок для OpenWrt (WireGuard / AmneziaWG)
-# Версия: Неубиваемая 5.0 (Жесткое удаление dnsmasq)
+# Версия: Неубиваемая 6.0 (Чистые имена интерфейсов и зон)
 # =================================================================
 
 wait_for_fw() {
@@ -47,10 +47,8 @@ echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
 safe_update
 
-# Агрессивное удаление старого dnsmasq ПОСЛЕ обновления списков
 if opkg list-installed | grep -q "^dnsmasq "; then
     echo "Удаляем базовый dnsmasq..."
-    # Используем --force-depends на случай, если другие пакеты на него завязаны
     opkg remove dnsmasq --force-depends
     echo "Ждем 7 секунд для перезапуска сети..."
     sleep 7
@@ -59,7 +57,6 @@ fi
 echo "Устанавливаем dnsmasq-full..."
 for i in 1 2 3; do
     wait_for_fw
-    # Добавляем --force-overwrite для гарантии установки поверх любых остатков
     if opkg install dnsmasq-full --force-overwrite; then
         echo "✅ dnsmasq-full успешно установлен!"
         echo "⏳ Даем системе 10 секунд на стабилизацию..."
@@ -85,6 +82,7 @@ if [ "$vpn_choice" = "1" ]; then
     done
     VPN_PROTO="wireguard"
     VPN_IFACE="WG_VPN"
+    VPN_ZONE="WG"
 elif [ "$vpn_choice" = "2" ]; then
     echo -e "\n=== Установка пакетов AmneziaWG ==="
     wait_for_fw
@@ -105,6 +103,7 @@ elif [ "$vpn_choice" = "2" ]; then
     done
     VPN_PROTO="amneziawg"
     VPN_IFACE="AWG_VPN"
+    VPN_ZONE="AWG"
 else
     echo "❌ Ошибка выбора."
     rm -f /etc/resolv.conf
@@ -117,6 +116,8 @@ sleep 5
 
 uci set network.$VPN_IFACE=interface
 uci set network.$VPN_IFACE.proto="$VPN_PROTO"
+# Магия: принудительно задаем имя физического устройства, чтобы OpenWrt не лепил префиксы
+uci set network.$VPN_IFACE.name="$VPN_IFACE"
 uci set network.$VPN_IFACE.listen_port='51820'
 uci add_list network.$VPN_IFACE.addresses='10.8.1.10/32'
 
@@ -130,19 +131,19 @@ uci add_list network.vpn_peer.allowed_ips='0.0.0.0/0'
 
 uci commit network
 
-echo "=== Настройка Firewall (Зона VPN) ==="
-uci set firewall.VPN_ZONE=zone
-uci set firewall.VPN_ZONE.name='VPN_ZONE'
-uci set firewall.VPN_ZONE.network="$VPN_IFACE"
-uci set firewall.VPN_ZONE.input='ACCEPT'
-uci set firewall.VPN_ZONE.output='ACCEPT'
-uci set firewall.VPN_ZONE.forward='REJECT'
-uci set firewall.VPN_ZONE.masq='1'
-uci set firewall.VPN_ZONE.mtu_fix='1'
+echo "=== Настройка Firewall (Зона $VPN_ZONE) ==="
+uci set firewall.$VPN_ZONE=zone
+uci set firewall.$VPN_ZONE.name="$VPN_ZONE"
+uci set firewall.$VPN_ZONE.network="$VPN_IFACE"
+uci set firewall.$VPN_ZONE.input='ACCEPT'
+uci set firewall.$VPN_ZONE.output='ACCEPT'
+uci set firewall.$VPN_ZONE.forward='REJECT'
+uci set firewall.$VPN_ZONE.masq='1'
+uci set firewall.$VPN_ZONE.mtu_fix='1'
 
 uci add firewall forwarding
 uci set firewall.@forwarding[-1].src='lan'
-uci set firewall.@forwarding[-1].dest='VPN_ZONE'
+uci set firewall.@forwarding[-1].dest="$VPN_ZONE"
 
 uci commit firewall
 
