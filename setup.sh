@@ -1,7 +1,7 @@
 #!/bin/sh
 # =================================================================
 # Точечный обход блокировок для OpenWrt (WireGuard / AmneziaWG)
-# Версия: Терминатор (Умная защита загрузок)
+# Версия: Неубиваемая (С лоботомией сторонних скриптов)
 # =================================================================
 
 wait_for_fw() {
@@ -17,14 +17,12 @@ wait_for_fw() {
     echo " OK!"
 }
 
-# Функция бронебойного обновления репозиториев
 safe_update() {
     local attempt=1
     local max_attempts=5
     while [ $attempt -le $max_attempts ]; do
         echo "Обновление репозиториев (Попытка $attempt из $max_attempts)..."
         wait_for_fw
-        # Запускаем opkg update и сохраняем вывод. Ищем ошибки wget.
         if opkg update 2>&1 | grep -q "wget returned 4\|Failed to download"; then
             echo "⚠️ Ошибка при скачивании списков. Ждем 5 сек и пробуем снова..."
             sleep 5
@@ -34,7 +32,7 @@ safe_update() {
             return 0
         fi
     done
-    echo "❌ Не удалось обновить репозитории после $max_attempts попыток. Скрипт остановлен."
+    echo "❌ Не удалось обновить репозитории. Скрипт остановлен."
     exit 1
 }
 
@@ -47,7 +45,6 @@ echo -e "\n=== Подготовка DNS и репозиториев ==="
 rm -f /etc/resolv.conf
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
-# Вызываем наш бронебойный апдейт
 safe_update
 
 if opkg list-installed | grep -q "^dnsmasq$"; then
@@ -58,8 +55,8 @@ if opkg list-installed | grep -q "^dnsmasq$"; then
 fi
 
 echo "Устанавливаем dnsmasq-full..."
-wait_for_fw
 for i in 1 2 3; do
+    wait_for_fw
     if opkg install dnsmasq-full; then
         echo "✅ dnsmasq-full успешно установлен!"
         echo "⏳ Даем системе 10 секунд на стабилизацию..."
@@ -90,11 +87,14 @@ elif [ "$vpn_choice" = "2" ]; then
     wait_for_fw
     wget --no-check-certificate -qO /tmp/awg-install.sh https://raw.githubusercontent.com/Slava-Shchipunov/awg-openwrt/refs/heads/master/amneziawg-install.sh
     
+    # ЛОБОТОМИЯ: Удаляем кусок скрипта, который настраивает интерфейс и вызывает сбои в автоматизации
+    sed -i '/Do you want to configure the amneziawg interface/,$d' /tmp/awg-install.sh
+    
     echo "Запускаем сторонний установщик на автопилоте..."
-    for i in 1 2 3; do
+    for i in 1 2 3 4; do
         wait_for_fw
-        # printf передает: 'y' (установить), 'y' (русификатор), 'n' (не настраивать интерфейс)
-        if printf "y\ny\nn\n" | sh /tmp/awg-install.sh; then
+        # yes "y" бесконечно отвечает Да на любые оставшиеся вопросы (установка пакетов и языка)
+        if yes "y" | sh /tmp/awg-install.sh; then
             echo "✅ Пакеты AmneziaWG успешно установлены!"
             break
         else
@@ -112,7 +112,6 @@ else
 fi
 
 echo -e "\n=== Создание интерфейса $VPN_IFACE ==="
-# Важный фикс: ждем сеть перед настройкой UCI, чтобы netifd не сошел с ума
 sleep 5
 
 uci set network.$VPN_IFACE=interface
@@ -160,97 +159,4 @@ EOF
 
 cat << 'EOF' >> /etc/dnsmasq.conf
 
-# --- VPN Domains (nftset) ---
-nftset=/rutracker.org/4#inet#fw4#vpn_domains
-nftset=/youtube.com/youtu.be/ytimg.com/googlevideo.com/4#inet#fw4#vpn_domains
-nftset=/instagram.com/cdninstagram.com/4#inet#fw4#vpn_domains
-nftset=/2ip.ru/4#inet#fw4#vpn_domains
-EOF
-
-echo "=== Установка службы vpn-routing ==="
-cat << EOF > /etc/init.d/vpn-routing
-#!/bin/sh /etc/rc.common
-
-START=99
-
-boot() {
-    sleep 30
-    start
-}
-
-start() {
-    IFACE="$VPN_IFACE"
-    if [ ! -d "/sys/class/net/\$IFACE" ]; then
-        return 1
-    fi
-
-    nft add set inet fw4 vpn_domains '{ type ipv4_addr; }' 2>/dev/null
-    nft flush set inet fw4 vpn_domains
-
-    if [ -f "/etc/static-ips.txt" ]; then
-        while read ip; do
-            [ -z "\$ip" ] && continue
-            echo "\$ip" | grep -q "^#" && continue
-            nft add element inet fw4 vpn_domains "{ \$ip }" 2>/dev/null
-        done < /etc/static-ips.txt
-    fi
-
-    nft add chain inet fw4 vpn_mark
-    nft flush chain inet fw4 vpn_mark
-    nft add rule inet fw4 vpn_mark ip daddr @vpn_domains meta mark set 0x1
-    
-    nft add rule inet fw4 srcnat oifname "\$IFACE" masquerade 2>/dev/null
-    nft add rule inet fw4 mangle_forward oifname "\$IFACE" tcp flags syn tcp option maxseg size set rt mtu 2>/dev/null
-
-    if ! nft list chain inet fw4 mangle_prerouting | grep -q "vpn_mark"; then
-        nft insert rule inet fw4 mangle_prerouting jump vpn_mark
-    fi
-
-    ip rule del fwmark 0x1 lookup 100 2>/dev/null
-    ip rule add fwmark 0x1 lookup 100
-    ip route flush table 100 2>/dev/null
-    ip route add default dev \$IFACE table 100
-
-    echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter
-    echo 0 > /proc/sys/net/ipv4/conf/\$IFACE/rp_filter
-}
-
-stop() {
-    nft flush chain inet fw4 vpn_mark 2>/dev/null
-    ip rule del fwmark 0x1 lookup 100 2>/dev/null
-    ip route flush table 100 2>/dev/null
-}
-
-restart() {
-    stop
-    sleep 2
-    start
-}
-EOF
-chmod +x /etc/init.d/vpn-routing
-/etc/init.d/vpn-routing enable
-
-echo "=== Настройка автозапуска (Hotplug) ==="
-mkdir -p /etc/hotplug.d/iface
-cat << EOF > /etc/hotplug.d/iface/99-vpn-routing
-#!/bin/sh
-[ "\$ACTION" = "ifup" ] || exit 0
-if [ "\$INTERFACE" = "$VPN_IFACE" ] || [ "\$INTERFACE" = "wan" ] || [ "\$INTERFACE" = "wan6" ] || echo "\$INTERFACE" | grep -q "pppoe"; then
-    logger -t vpn-routing "Interface \$INTERFACE is UP. Restarting routing in 5s..."
-    sleep 5
-    /etc/init.d/vpn-routing restart
-fi
-EOF
-chmod +x /etc/hotplug.d/iface/99-vpn-routing
-
-echo "=== Завершение ==="
-rm -f /etc/resolv.conf
-ln -s /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
-
-/etc/init.d/dnsmasq restart
-/etc/init.d/vpn-routing start
-
-echo ""
-echo "✅ ГОТОВО! Роутер настроен."
-echo "Зайдите в веб-интерфейс (Сеть -> Интерфейсы), нажмите 'Редактировать' на интерфейсе $VPN_IFACE,"
-echo "вставьте ваши ключи и IP-адрес сервера."
+# --- VPN Domains
