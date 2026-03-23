@@ -1,11 +1,11 @@
 #!/bin/sh
 # =================================================================
 # Точечный обход блокировок для OpenWrt (WireGuard / AmneziaWG)
-# Версия: Бронебойная 2.0 (Абсолютный автопилот)
+# Версия: Терминатор (Умная защита загрузок)
 # =================================================================
 
 wait_for_fw() {
-    echo -n "Ожидание готовности сети и фаервола"
+    echo -n "Ожидание сети"
     while ! ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1; do
         echo -n "."
         sleep 2
@@ -17,6 +17,27 @@ wait_for_fw() {
     echo " OK!"
 }
 
+# Функция бронебойного обновления репозиториев
+safe_update() {
+    local attempt=1
+    local max_attempts=5
+    while [ $attempt -le $max_attempts ]; do
+        echo "Обновление репозиториев (Попытка $attempt из $max_attempts)..."
+        wait_for_fw
+        # Запускаем opkg update и сохраняем вывод. Ищем ошибки wget.
+        if opkg update 2>&1 | grep -q "wget returned 4\|Failed to download"; then
+            echo "⚠️ Ошибка при скачивании списков. Ждем 5 сек и пробуем снова..."
+            sleep 5
+            attempt=$((attempt+1))
+        else
+            echo "✅ Репозитории успешно обновлены!"
+            return 0
+        fi
+    done
+    echo "❌ Не удалось обновить репозитории после $max_attempts попыток. Скрипт остановлен."
+    exit 1
+}
+
 echo "=== Выбор протокола ==="
 echo "1) Стандартный WireGuard (Пакеты из оф. репозитория)"
 echo "2) AmneziaWG (Установка пакетов через скрипт Slava-Shchipunov)"
@@ -26,8 +47,8 @@ echo -e "\n=== Подготовка DNS и репозиториев ==="
 rm -f /etc/resolv.conf
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
-wait_for_fw
-opkg update
+# Вызываем наш бронебойный апдейт
+safe_update
 
 if opkg list-installed | grep -q "^dnsmasq$"; then
     echo "Удаляем базовый dnsmasq..."
@@ -41,11 +62,11 @@ wait_for_fw
 for i in 1 2 3; do
     if opkg install dnsmasq-full; then
         echo "✅ dnsmasq-full успешно установлен!"
-        echo "⏳ Даем системе 15 секунд на стабилизацию фоновых процессов (netifd/fw4)..."
-        sleep 15
+        echo "⏳ Даем системе 10 секунд на стабилизацию..."
+        sleep 10
         break
     else
-        echo "⚠️ Ошибка скачивания. Ждем 5 секунд и пробуем снова (Попытка $i из 3)..."
+        echo "⚠️ Ошибка скачивания. Ждем 5 сек и пробуем снова..."
         sleep 5
     fi
 done
@@ -58,7 +79,7 @@ if [ "$vpn_choice" = "1" ]; then
             echo "✅ Пакеты WireGuard установлены!"
             break
         else
-            echo "⚠️ Ошибка скачивания пакетов WG. Пробуем снова (Попытка $i из 3)..."
+            echo "⚠️ Ошибка скачивания пакетов WG. Пробуем снова..."
             sleep 5
         fi
     done
@@ -66,33 +87,34 @@ if [ "$vpn_choice" = "1" ]; then
     VPN_IFACE="WG_VPN"
 elif [ "$vpn_choice" = "2" ]; then
     echo -e "\n=== Установка пакетов AmneziaWG ==="
-    echo "Скачиваем сторонний установщик..."
     wait_for_fw
     wget --no-check-certificate -qO /tmp/awg-install.sh https://raw.githubusercontent.com/Slava-Shchipunov/awg-openwrt/refs/heads/master/amneziawg-install.sh
     
-    echo "Запускаем установку на автопилоте (ответы Y и n будут введены автоматически)..."
-    for i in 1 2 3 4; do
+    echo "Запускаем сторонний установщик на автопилоте..."
+    for i in 1 2 3; do
         wait_for_fw
-        # printf передает 'y' (установить пакеты) и 'n' (не настраивать интерфейс)
-        if printf "y\nn\n" | sh /tmp/awg-install.sh; then
+        # printf передает: 'y' (установить), 'y' (русификатор), 'n' (не настраивать интерфейс)
+        if printf "y\ny\nn\n" | sh /tmp/awg-install.sh; then
             echo "✅ Пакеты AmneziaWG успешно установлены!"
             break
         else
-            echo "⚠️ Ошибка стороннего скрипта (вероятно, фоновый рестарт сети)."
-            echo "⏳ Ждем 10 секунд и запускаем повторно (Попытка $i из 4)..."
+            echo "⚠️ Ошибка стороннего скрипта. Ждем 10 сек и пробуем снова..."
             sleep 10
         fi
     done
     VPN_PROTO="amneziawg"
     VPN_IFACE="AWG_VPN"
 else
-    echo "❌ Ошибка выбора. Скрипт остановлен."
+    echo "❌ Ошибка выбора."
     rm -f /etc/resolv.conf
     ln -s /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
     exit 1
 fi
 
 echo -e "\n=== Создание интерфейса $VPN_IFACE ==="
+# Важный фикс: ждем сеть перед настройкой UCI, чтобы netifd не сошел с ума
+sleep 5
+
 uci set network.$VPN_IFACE=interface
 uci set network.$VPN_IFACE.proto="$VPN_PROTO"
 uci set network.$VPN_IFACE.listen_port='51820'
@@ -186,4 +208,49 @@ start() {
 
     ip rule del fwmark 0x1 lookup 100 2>/dev/null
     ip rule add fwmark 0x1 lookup 100
-    ip route flush table
+    ip route flush table 100 2>/dev/null
+    ip route add default dev \$IFACE table 100
+
+    echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter
+    echo 0 > /proc/sys/net/ipv4/conf/\$IFACE/rp_filter
+}
+
+stop() {
+    nft flush chain inet fw4 vpn_mark 2>/dev/null
+    ip rule del fwmark 0x1 lookup 100 2>/dev/null
+    ip route flush table 100 2>/dev/null
+}
+
+restart() {
+    stop
+    sleep 2
+    start
+}
+EOF
+chmod +x /etc/init.d/vpn-routing
+/etc/init.d/vpn-routing enable
+
+echo "=== Настройка автозапуска (Hotplug) ==="
+mkdir -p /etc/hotplug.d/iface
+cat << EOF > /etc/hotplug.d/iface/99-vpn-routing
+#!/bin/sh
+[ "\$ACTION" = "ifup" ] || exit 0
+if [ "\$INTERFACE" = "$VPN_IFACE" ] || [ "\$INTERFACE" = "wan" ] || [ "\$INTERFACE" = "wan6" ] || echo "\$INTERFACE" | grep -q "pppoe"; then
+    logger -t vpn-routing "Interface \$INTERFACE is UP. Restarting routing in 5s..."
+    sleep 5
+    /etc/init.d/vpn-routing restart
+fi
+EOF
+chmod +x /etc/hotplug.d/iface/99-vpn-routing
+
+echo "=== Завершение ==="
+rm -f /etc/resolv.conf
+ln -s /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
+
+/etc/init.d/dnsmasq restart
+/etc/init.d/vpn-routing start
+
+echo ""
+echo "✅ ГОТОВО! Роутер настроен."
+echo "Зайдите в веб-интерфейс (Сеть -> Интерфейсы), нажмите 'Редактировать' на интерфейсе $VPN_IFACE,"
+echo "вставьте ваши ключи и IP-адрес сервера."
