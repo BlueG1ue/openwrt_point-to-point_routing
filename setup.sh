@@ -1,7 +1,7 @@
 #!/bin/sh
 # =================================================================
 # Точечный обход блокировок для OpenWrt (WireGuard / AmneziaWG)
-# Версия: Неубиваемая 4.0 (Мягкое применение настроек)
+# Версия: Неубиваемая 5.0 (Жесткое удаление dnsmasq)
 # =================================================================
 
 wait_for_fw() {
@@ -47,9 +47,11 @@ echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
 safe_update
 
-if opkg list-installed | grep -q "^dnsmasq$"; then
+# Агрессивное удаление старого dnsmasq ПОСЛЕ обновления списков
+if opkg list-installed | grep -q "^dnsmasq "; then
     echo "Удаляем базовый dnsmasq..."
-    opkg remove dnsmasq
+    # Используем --force-depends на случай, если другие пакеты на него завязаны
+    opkg remove dnsmasq --force-depends
     echo "Ждем 7 секунд для перезапуска сети..."
     sleep 7
 fi
@@ -57,7 +59,8 @@ fi
 echo "Устанавливаем dnsmasq-full..."
 for i in 1 2 3; do
     wait_for_fw
-    if opkg install dnsmasq-full; then
+    # Добавляем --force-overwrite для гарантии установки поверх любых остатков
+    if opkg install dnsmasq-full --force-overwrite; then
         echo "✅ dnsmasq-full успешно установлен!"
         echo "⏳ Даем системе 10 секунд на стабилизацию..."
         sleep 10
@@ -126,7 +129,6 @@ uci set network.vpn_peer.route_allowed_ips='0'
 uci add_list network.vpn_peer.allowed_ips='0.0.0.0/0'
 
 uci commit network
-# Убрали жесткий рестарт сети отсюда
 
 echo "=== Настройка Firewall (Зона VPN) ==="
 uci set firewall.VPN_ZONE=zone
@@ -143,7 +145,6 @@ uci set firewall.@forwarding[-1].src='lan'
 uci set firewall.@forwarding[-1].dest='VPN_ZONE'
 
 uci commit firewall
-# Убрали жесткий рестарт фаервола отсюда
 
 echo "=== Создание списков маршрутизации ==="
 cat << 'EOF' > /etc/static-ips.txt
@@ -244,7 +245,6 @@ echo "=== Завершение ==="
 rm -f /etc/resolv.conf
 ln -s /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
 
-# Перезапускаем все службы разом в самом конце
 echo "Применяем все сетевые настройки (Возможен кратковременный обрыв связи)..."
 /etc/init.d/network restart
 /etc/init.d/firewall restart
