@@ -45,7 +45,7 @@
 Подключитесь к роутеру по SSH и выполните одну команду:
 
 ```bash
-wget --no-check-certificate -O /tmp/setup.sh [https://raw.githubusercontent.com/BlueG1ue/openwrt_point-to-point_routing/main/setup.sh](https://raw.githubusercontent.com/BlueG1ue/openwrt_point-to-point_routing/main/setup.sh) && sh /tmp/setup.sh
+wget --no-check-certificate -O /tmp/setup.sh https://raw.githubusercontent.com/BlueG1ue/openwrt_point-to-point_routing/main/setup.sh && sh /tmp/setup.sh
 ```
 
 
