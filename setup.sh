@@ -1,7 +1,7 @@
 #!/bin/sh
 # =================================================================
 # Точечный обход блокировок для OpenWrt (WireGuard / AmneziaWG)
-# Версия: 12.0 (Финальный лоск и правильный порядок вывода)
+# Версия: 12.1 (Идеально тихая установка AmneziaWG)
 # =================================================================
 
 wait_for_fw() {
@@ -112,13 +112,16 @@ elif [ "$vpn_choice" = "2" ]; then
         fi
     done
     
-    sed -i '/Do you want to configure the amneziawg interface/,$d' /tmp/awg-install.sh
+    # ХИРУРГИЯ: Отрезаем скрипт ровно перед тем, как он начнет задавать вопросы
+    sed -i '/Install Russian language pack/,$d' /tmp/awg-install.sh
     
-    echo "Запускаем сторонний установщик на автопилоте..."
-    echo "(Скрипт автоматически ответит 'Да' на вопрос об установке русской локализации)"
+    echo "Запускаем тихую установку..."
     for i in 1 2 3 4; do
         wait_for_fw
-        if yes "y" | sh /tmp/awg-install.sh; then
+        # Запускаем скрипт чисто, без костыля с автоматическими ответами
+        if sh /tmp/awg-install.sh; then
+            # Сами доустанавливаем русификатор в фоновом режиме
+            opkg install luci-i18n-amneziawg-ru >/dev/null 2>&1
             echo "✅ Пакеты AmneziaWG успешно установлены!"
             break
         else
@@ -291,5 +294,4 @@ sleep 5
 /etc/init.d/firewall restart
 /etc/init.d/dnsmasq restart
 /etc/init.d/vpn-routing start
-# Эта команда роняет SSH-сессию, поэтому она идет последней
 /etc/init.d/network restart
