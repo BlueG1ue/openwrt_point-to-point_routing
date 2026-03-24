@@ -1,7 +1,7 @@
 #!/bin/sh
 # =================================================================
 # Точечный обход блокировок для OpenWrt (WireGuard / AmneziaWG)
-# Версия: Release (Финальные имена и зоны)
+# Версия: 11.1 (Самоочистка и защита от конфликтов при перезапуске)
 # =================================================================
 
 wait_for_fw() {
@@ -40,6 +40,19 @@ echo "=== Выбор протокола ==="
 echo "1) Стандартный WireGuard (Пакеты из оф. репозитория)"
 echo "2) AmneziaWG (Установка пакетов через скрипт Slava-Shchipunov)"
 read -p "Введите цифру (1 или 2): " vpn_choice
+
+echo -e "\n=== Очистка старых настроек (Защита от конфликтов) ==="
+/etc/init.d/vpn-routing stop 2>/dev/null
+rm -f /etc/hotplug.d/iface/99-vpn-routing
+rm -f /etc/init.d/vpn-routing
+sed -i '/vpn_domains/d' /etc/dnsmasq.conf 2>/dev/null
+uci delete network.WG 2>/dev/null
+uci delete network.AWG_VPN 2>/dev/null
+uci delete network.vpn_peer 2>/dev/null
+uci delete firewall.WG 2>/dev/null
+uci delete firewall.AWG 2>/dev/null
+uci delete firewall.vpn_fwd 2>/dev/null
+uci commit
 
 echo -e "\n=== Подготовка DNS и репозиториев ==="
 rm -f /etc/resolv.conf
@@ -150,9 +163,10 @@ uci set firewall.$VPN_ZONE.forward='REJECT'
 uci set firewall.$VPN_ZONE.masq='1'
 uci set firewall.$VPN_ZONE.mtu_fix='1'
 
-uci add firewall forwarding
-uci set firewall.@forwarding[-1].src='lan'
-uci set firewall.@forwarding[-1].dest="$VPN_ZONE"
+# Создаем именованное правило пересылки, чтобы оно не дублировалось
+uci set firewall.vpn_fwd=forwarding
+uci set firewall.vpn_fwd.src='lan'
+uci set firewall.vpn_fwd.dest="$VPN_ZONE"
 
 uci commit firewall
 
@@ -190,4 +204,83 @@ start() {
     IFACE="$VPN_IFACE"
     
     # Запрашиваем реальное имя физического устройства у ядра OpenWrt (через ubus)
-    L3_DEV
+    L3_DEV=\$(ubus call network.interface.\$IFACE status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+    [ -z "\$L3_DEV" ] && L3_DEV="\$IFACE"
+
+    if [ ! -d "/sys/class/net/\$L3_DEV" ]; then
+        logger -t vpn-routing "Device \$L3_DEV not found. Waiting for VPN to connect..."
+    fi
+
+    nft add set inet fw4 vpn_domains '{ type ipv4_addr; }' 2>/dev/null
+    nft flush set inet fw4 vpn_domains
+
+    if [ -f "/etc/static-ips.txt" ]; then
+        while read ip; do
+            [ -z "\$ip" ] && continue
+            echo "\$ip" | grep -q "^#" && continue
+            nft add element inet fw4 vpn_domains "{ \$ip }" 2>/dev/null
+        done < /etc/static-ips.txt
+    fi
+
+    nft add chain inet fw4 vpn_mark
+    nft flush chain inet fw4 vpn_mark
+    nft add rule inet fw4 vpn_mark ip daddr @vpn_domains meta mark set 0x1
+    
+    nft add rule inet fw4 srcnat oifname "\$L3_DEV" masquerade 2>/dev/null
+    nft add rule inet fw4 mangle_forward oifname "\$L3_DEV" tcp flags syn tcp option maxseg size set rt mtu 2>/dev/null
+
+    if ! nft list chain inet fw4 mangle_prerouting | grep -q "vpn_mark"; then
+        nft insert rule inet fw4 mangle_prerouting jump vpn_mark
+    fi
+
+    ip rule del fwmark 0x1 lookup 100 2>/dev/null
+    ip rule add fwmark 0x1 lookup 100
+    ip route flush table 100 2>/dev/null
+    ip route add default dev \$L3_DEV table 100 2>/dev/null
+
+    echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null
+    echo 0 > /proc/sys/net/ipv4/conf/\$L3_DEV/rp_filter 2>/dev/null
+}
+
+stop() {
+    nft flush chain inet fw4 vpn_mark 2>/dev/null
+    ip rule del fwmark 0x1 lookup 100 2>/dev/null
+    ip route flush table 100 2>/dev/null
+}
+
+restart() {
+    stop
+    sleep 2
+    start
+}
+EOF
+chmod +x /etc/init.d/vpn-routing
+/etc/init.d/vpn-routing enable
+
+echo "=== Настройка автозапуска (Hotplug) ==="
+mkdir -p /etc/hotplug.d/iface
+cat << EOF > /etc/hotplug.d/iface/99-vpn-routing
+#!/bin/sh
+[ "\$ACTION" = "ifup" ] || exit 0
+if [ "\$INTERFACE" = "$VPN_IFACE" ] || [ "\$INTERFACE" = "wan" ] || [ "\$INTERFACE" = "wan6" ] || echo "\$INTERFACE" | grep -q "pppoe"; then
+    logger -t vpn-routing "Interface \$INTERFACE is UP. Restarting routing in 5s..."
+    sleep 5
+    /etc/init.d/vpn-routing restart
+fi
+EOF
+chmod +x /etc/hotplug.d/iface/99-vpn-routing
+
+echo "=== Завершение ==="
+rm -f /etc/resolv.conf
+ln -s /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
+
+echo "Применяем все сетевые настройки (Возможен кратковременный обрыв связи)..."
+/etc/init.d/network restart
+/etc/init.d/firewall restart
+/etc/init.d/dnsmasq restart
+/etc/init.d/vpn-routing start
+
+echo ""
+echo "✅ ГОТОВО! Роутер настроен."
+echo "Зайдите в веб-интерфейс (Сеть -> Интерфейсы), нажмите 'Редактировать' на интерфейсе $VPN_IFACE,"
+echo "вставьте ваши ключи и IP-адрес сервера."
