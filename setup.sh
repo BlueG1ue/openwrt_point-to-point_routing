@@ -1,7 +1,7 @@
 #!/bin/sh
 # =================================================================
 # Точечный обход блокировок для OpenWrt (WireGuard / AmneziaWG)
-# Версия: 11.1 (Самоочистка и защита от конфликтов при перезапуске)
+# Версия: 12.0 (Финальный лоск и правильный порядок вывода)
 # =================================================================
 
 wait_for_fw() {
@@ -115,6 +115,7 @@ elif [ "$vpn_choice" = "2" ]; then
     sed -i '/Do you want to configure the amneziawg interface/,$d' /tmp/awg-install.sh
     
     echo "Запускаем сторонний установщик на автопилоте..."
+    echo "(Скрипт автоматически ответит 'Да' на вопрос об установке русской локализации)"
     for i in 1 2 3 4; do
         wait_for_fw
         if yes "y" | sh /tmp/awg-install.sh; then
@@ -163,7 +164,6 @@ uci set firewall.$VPN_ZONE.forward='REJECT'
 uci set firewall.$VPN_ZONE.masq='1'
 uci set firewall.$VPN_ZONE.mtu_fix='1'
 
-# Создаем именованное правило пересылки, чтобы оно не дублировалось
 uci set firewall.vpn_fwd=forwarding
 uci set firewall.vpn_fwd.src='lan'
 uci set firewall.vpn_fwd.dest="$VPN_ZONE"
@@ -203,7 +203,6 @@ boot() {
 start() {
     IFACE="$VPN_IFACE"
     
-    # Запрашиваем реальное имя физического устройства у ядра OpenWrt (через ubus)
     L3_DEV=\$(ubus call network.interface.\$IFACE status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
     [ -z "\$L3_DEV" ] && L3_DEV="\$IFACE"
 
@@ -270,17 +269,27 @@ fi
 EOF
 chmod +x /etc/hotplug.d/iface/99-vpn-routing
 
-echo "=== Завершение ==="
 rm -f /etc/resolv.conf
 ln -s /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
 
-echo "Применяем все сетевые настройки (Возможен кратковременный обрыв связи)..."
-/etc/init.d/network restart
+# === ФИНАЛЬНЫЕ СООБЩЕНИЯ ===
+echo -e "\n================================================================="
+echo "✅ БАЗОВАЯ НАСТРОЙКА ЗАВЕРШЕНА!"
+echo "================================================================="
+echo "Ваши следующие шаги:"
+echo "1. Зайдите в веб-интерфейс роутера (Сеть -> Интерфейсы)."
+echo "2. Нажмите 'Редактировать' на интерфейсе $VPN_IFACE."
+echo "3. Вставьте ваши ключи и IP-адрес сервера."
+echo "================================================================="
+echo "⚠️ ВНИМАНИЕ: Сейчас скрипт перезапустит сеть для применения настроек."
+echo "Ваше SSH-соединение ЗАВИСНЕТ или ОБОРВЕТСЯ — это абсолютно нормально!"
+echo "Просто закройте терминал через 10 секунд и переходите в браузер."
+echo "================================================================="
+echo "Перезапуск сети начнется через 5 секунд..."
+sleep 5
+
 /etc/init.d/firewall restart
 /etc/init.d/dnsmasq restart
 /etc/init.d/vpn-routing start
-
-echo ""
-echo "✅ ГОТОВО! Роутер настроен."
-echo "Зайдите в веб-интерфейс (Сеть -> Интерфейсы), нажмите 'Редактировать' на интерфейсе $VPN_IFACE,"
-echo "вставьте ваши ключи и IP-адрес сервера."
+# Эта команда роняет SSH-сессию, поэтому она идет последней
+/etc/init.d/network restart
